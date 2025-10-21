@@ -1,0 +1,16 @@
+# LP Aggregation RFQ System Dependencies
+
+# Terminal colors
+colorama>=0.4.6
+
+# Async support (Python 3.7+)
+# asyncio is built-in
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# Code quality
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0

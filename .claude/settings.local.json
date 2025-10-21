@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python tests/test_scenario_1.py)",
+      "Bash(timeout 25 python tests/test_scenario_1.py)",
+      "Bash(python verify_db.py)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
