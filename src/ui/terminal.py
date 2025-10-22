@@ -5,6 +5,7 @@ Terminal interface for operator input and quote display.
 from colorama import Fore, Style, init
 from typing import Optional
 from ..core.models import QuoteRequest, AggregatedQuote
+from ..config.pairs import get_pair_config
 
 init(autoreset=True)
 
@@ -22,8 +23,12 @@ class TerminalInterface:
         """
         Parse single-line quote request.
 
-        Format: <side> <amount> <pair>
-        Example: b 1.5 btcusdt
+        Format: <side> <amount> <target_asset> <pair>
+        Example: b 1.5 btc btcusdt  (buy 1.5 BTC)
+        Example: b 50000 usdt btcusdt  (buy 50000 USDT worth of BTC)
+
+        Legacy format (3 parts): <side> <amount> <pair>
+        Example: b 1.5 btcusdt  (defaults to base asset)
 
         Args:
             user_input: User input string
@@ -33,11 +38,20 @@ class TerminalInterface:
         """
         try:
             parts = user_input.strip().split()
-            if len(parts) != 3:
+
+            # Support both 3-part (legacy) and 4-part (new) formats
+            if len(parts) == 3:
+                # Legacy format: side, amount, pair (assume target_asset = base_asset)
+                side_input, amount_str, pair_input = parts
+                target_asset_input = None  # Will default to base
+            elif len(parts) == 4:
+                # New format: side, amount, target_asset, pair
+                side_input, amount_str, target_asset_input, pair_input = parts
+            else:
                 return None
 
             # Parse side
-            side_input = parts[0].lower()
+            side_input = side_input.lower()
             if side_input in ['b', 'buy']:
                 side = 'BUY'
             elif side_input in ['s', 'sell']:
@@ -46,26 +60,38 @@ class TerminalInterface:
                 return None
 
             # Parse amount
-            amount = float(parts[1])
+            amount = float(amount_str)
             if amount <= 0:
                 return None
 
-            # Parse pair
-            pair_input = parts[2].upper()
-            if 'USDT' in pair_input:
-                base_asset = pair_input.replace('USDT', '')
-                quote_asset = 'USDT'
-            elif 'USDC' in pair_input:
-                base_asset = pair_input.replace('USDC', '')
-                quote_asset = 'USDC'
-            else:
+            # Parse pair using pair config
+            pair_input = pair_input.upper()
+            try:
+                pair_config = get_pair_config(pair_input)
+                base_asset = pair_config.base_asset
+                quote_asset = pair_config.quote_asset
+            except ValueError:
                 return None
+
+            # Determine target_asset
+            if target_asset_input is None:
+                # Legacy mode: default to base asset
+                target_asset = base_asset
+            else:
+                target_asset_input = target_asset_input.upper()
+                if target_asset_input == base_asset:
+                    target_asset = base_asset
+                elif target_asset_input == quote_asset:
+                    target_asset = quote_asset
+                else:
+                    return None
 
             return QuoteRequest(
                 side=side,
                 amount=amount,
                 base_asset=base_asset,
-                quote_asset=quote_asset
+                quote_asset=quote_asset,
+                target_asset=target_asset
             )
 
         except (ValueError, IndexError):
@@ -103,24 +129,41 @@ class TerminalInterface:
                 print(f"{Fore.RED}  Invalid amount. Enter a positive number{Style.RESET_ALL}")
 
         # Get pair
-        pair_input = input(f"  Pair (e.g., BTCUSDT): ").strip().upper()
+        while True:
+            pair_input = input(f"  Pair (e.g., BTCUSDT): ").strip().upper()
+            try:
+                pair_config = get_pair_config(pair_input)
+                base_asset = pair_config.base_asset
+                quote_asset = pair_config.quote_asset
+                break
+            except ValueError:
+                print(f"{Fore.RED}  Unsupported pair. Supported: BTCUSDT, ETHUSDT, USDCUSDT{Style.RESET_ALL}")
 
-        # Parse pair (simple parsing for now)
-        if 'USDT' in pair_input:
-            base_asset = pair_input.replace('USDT', '')
-            quote_asset = 'USDT'
-        elif 'USDC' in pair_input:
-            base_asset = pair_input.replace('USDC', '')
-            quote_asset = 'USDC'
-        else:
-            print(f"{Fore.RED}  Unsupported pair format{Style.RESET_ALL}")
-            return None
+        # Get target asset
+        while True:
+            target_input = input(
+                f"  Target asset ({base_asset} or {quote_asset}, default={base_asset}): "
+            ).strip().upper()
+
+            if not target_input:
+                # Default to base asset
+                target_asset = base_asset
+                break
+            elif target_input == base_asset:
+                target_asset = base_asset
+                break
+            elif target_input == quote_asset:
+                target_asset = quote_asset
+                break
+            else:
+                print(f"{Fore.RED}  Invalid target asset. Choose {base_asset} or {quote_asset}{Style.RESET_ALL}")
 
         return QuoteRequest(
             side=side,
             amount=amount,
             base_asset=base_asset,
-            quote_asset=quote_asset
+            quote_asset=quote_asset,
+            target_asset=target_asset
         )
 
     def display_quote(self, quote: AggregatedQuote):

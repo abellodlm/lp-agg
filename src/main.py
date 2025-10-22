@@ -10,37 +10,55 @@ This application:
 """
 
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, Dict
 from colorama import Fore, Style
 
+import math
 from .config.settings import settings
+from .config.pairs import get_pair_config
 from .core.models import QuoteRequest, AggregatedQuote, LPQuote
 from .core.lp_aggregator import LPAggregator
 from .core.quote_streamer import QuoteStreamer
 from .lps.base_lp import LiquidityProvider
 from .lps.mock_lp import MockLP
+from .lps.sine_lp import SineLPProvider
 from .ui.terminal import TerminalInterface
 from .ui.monitor import get_monitor
+from .execution import determine_hedge_params, calculate_pnl, execute_simulated_trade
+from .execution.execution_manager import ExecutionManager
 
 
 def create_mock_lps() -> List[LiquidityProvider]:
     """
-    Create mock LP instances for testing.
+    Create Sine Wave LP instances for realistic price competition.
 
-    In production, replace with real LP integrations.
+    Creates LPs with phase-shifted sine wave pricing:
+    - LP-1: phase=0 (starts mid, rising)
+    - LP-2: phase=π/2 (starts at peak)
+    - LP-3: phase=π (starts mid, falling)
+
+    This creates realistic competition where different LPs win at different times.
     """
+    # Sine wave parameters (increased frequency for faster competition)
+    amplitude = 100.0
+    frequency = 0.15  # Increased from 0.05 for faster oscillation (3x faster)
+    trend = -10.0
+    base_price = settings.mock_base_price
+
+    # Phase offsets for 3 LPs (creates competition)
+    phases = [0.0, math.pi / 2, math.pi]
+
     lps = []
-
-    for i in range(settings.mock_lp_count):
-        # Vary prices slightly for each LP
-        price_offset = i * 100  # LP1: 100000, LP2: 100100, LP3: 100200
-
-        lp = MockLP(
-            name=f"MockLP-{i+1}",
-            base_price=settings.mock_base_price + price_offset,
+    for i in range(min(settings.mock_lp_count, 3)):  # Max 3 LPs for clear phases
+        lp = SineLPProvider(
+            name=f"LP-{i+1}",
+            base_price=base_price,
+            amplitude=amplitude,
+            frequency=frequency,
+            phase=phases[i],
+            trend=trend,
             spread_bps=settings.mock_spread_bps,
-            response_delay=(settings.mock_min_delay, settings.mock_max_delay),
-            failure_rate=settings.mock_failure_rate
+            response_delay=(settings.mock_min_delay, settings.mock_max_delay)
         )
         lps.append(lp)
 
@@ -51,7 +69,8 @@ async def handle_quote_stream(
     request: QuoteRequest,
     aggregator: LPAggregator,
     streamer: QuoteStreamer,
-    monitor
+    monitor,
+    state: Dict
 ):
     """
     Stream quotes for a given request and update monitor.
@@ -61,6 +80,10 @@ async def handle_quote_stream(
         aggregator: LP aggregator instance
         streamer: Quote streamer instance
         monitor: Monitor GUI instance
+        state: Shared state dictionary with keys:
+            - locked_quote: Current locked AggregatedQuote
+            - locked_lp_quote: Current locked LPQuote
+            - stop_stream: Set to True to stop streaming
     """
     # Track previous locked LP to detect lock changes
     previous_locked_lp = None
@@ -69,27 +92,59 @@ async def handle_quote_stream(
     def on_quote_update(all_lp_quotes: List[LPQuote], best_quote: AggregatedQuote, poll_count: int, is_improvement: bool, locked_lp_name: Optional[str]):
         nonlocal previous_locked_lp
 
-        # Update monitor with all LP data
-        monitor.update_display(all_lp_quotes, best_quote, poll_count, locked_lp_name)
+        # Check if stream should stop
+        if state.get('stop_stream', False):
+            streamer.stop()
+            return
 
-        # Terminal feedback on lock changes and improvements
-        if poll_count == 1:
-            # Initial lock
-            print(f"{Fore.CYAN}[Poll {poll_count}] LOCKED: {locked_lp_name} @ {best_quote.client_price:,.4f} {best_quote.quote_asset}{Style.RESET_ALL}")
-            previous_locked_lp = locked_lp_name
-        elif is_improvement:
-            # Improvement - lock switched
-            print(f"{Fore.GREEN}[Poll {poll_count}] IMPROVEMENT: {locked_lp_name} @ {best_quote.client_price:,.4f} {best_quote.quote_asset} (unlocked {previous_locked_lp}){Style.RESET_ALL}")
-            previous_locked_lp = locked_lp_name
+        try:
+            # Update shared state with locked quote
+            state['locked_quote'] = best_quote
+            state['locked_lp_quote'] = next((q for q in all_lp_quotes if q.lp_name == locked_lp_name), None)
 
-    # Get auto-refresh setting from monitor
-    auto_refresh = monitor.is_auto_refresh_enabled()
+            # Update monitor with all LP data
+            monitor.update_display(all_lp_quotes, best_quote, poll_count, locked_lp_name)
+
+            # Terminal feedback - only show initial lock and improvements
+            if poll_count == 1:
+                # Initial lock - show quote
+                print(f"\n{Fore.CYAN}{'='*70}")
+                print(f"QUOTE LOCKED")
+                print(f"{'='*70}{Style.RESET_ALL}\n")
+                print(f"  LP:             {locked_lp_name}")
+                print(f"  Side:           {best_quote.side} {best_quote.amount} {best_quote.target_asset}")
+                print(f"  Client Pays:    {best_quote.client_gives_amount:,.8f} {best_quote.client_gives_asset}")
+                print(f"  Client Gets:    {best_quote.client_receives_amount:,.8f} {best_quote.client_receives_asset}")
+                print(f"  Price:          {best_quote.client_price:,.4f} {best_quote.quote_asset}")
+                print(f"  Valid for:      {best_quote.time_remaining():.1f}s")
+                print(f"\n{Fore.CYAN}{'='*70}{Style.RESET_ALL}\n")
+                print(f"{Fore.YELLOW}Commands: [p] proceed  [c] cancel  [q] quit{Style.RESET_ALL}\n")
+
+                previous_locked_lp = locked_lp_name
+            elif is_improvement:
+                # Improvement - lock switched
+                print(f"\n{Fore.GREEN}{'='*70}")
+                print(f"IMPROVED QUOTE")
+                print(f"{'='*70}{Style.RESET_ALL}\n")
+                print(f"  LP:             {locked_lp_name}")
+                print(f"  Side:           {best_quote.side} {best_quote.amount} {best_quote.target_asset}")
+                print(f"  Client Pays:    {best_quote.client_gives_amount:,.8f} {best_quote.client_gives_asset}")
+                print(f"  Client Gets:    {best_quote.client_receives_amount:,.8f} {best_quote.client_receives_asset}")
+                print(f"  Price:          {best_quote.client_price:,.4f} {best_quote.quote_asset}")
+                print(f"  Valid for:      {best_quote.time_remaining():.1f}s")
+                print(f"\n{Fore.GREEN}{'='*70}{Style.RESET_ALL}\n")
+                print(f"{Fore.YELLOW}Commands: [p] proceed  [c] cancel  [q] quit{Style.RESET_ALL}\n")
+                previous_locked_lp = locked_lp_name
+
+        except Exception as e:
+            print(f"{Fore.RED}[ERROR] in quote callback: {e}{Style.RESET_ALL}")
+            import traceback
+            traceback.print_exc()
+
+    # Get auto-refresh setting from monitor (force to True for continuous polling)
+    auto_refresh = True  # Force enabled for continuous price updates
 
     # Stream quotes (indefinitely if auto-refresh, otherwise until expiry)
-    print(f"{Fore.CYAN}[OK] Streaming started. Monitor window updated.{Style.RESET_ALL}")
-    if auto_refresh:
-        print(f"{Fore.CYAN}[OK] Auto-refresh enabled - will continue until stopped{Style.RESET_ALL}")
-
     try:
         await streamer.stream_quotes(
             request=request,
@@ -98,28 +153,26 @@ async def handle_quote_stream(
             auto_refresh=auto_refresh
         )
 
-        # Stream ended (quote expired and no auto-refresh)
-        print(f"\n{Fore.YELLOW}[!] Quote expired{Style.RESET_ALL}")
-        monitor.show_expired()
+        # Stream ended
+        if state.get('stop_stream', False):
+            # Stopped intentionally (execution completed)
+            pass
+        else:
+            # Quote expired
+            print(f"\n{Fore.YELLOW}Quote expired{Style.RESET_ALL}\n")
+            monitor.show_expired()
 
     except asyncio.CancelledError:
-        # Stream was manually cancelled (new request or 'x' command)
-        print(f"{Fore.YELLOW}[!] Stream stopped{Style.RESET_ALL}")
+        # Stream was manually cancelled
         streamer.stop()
 
 
 async def main_loop():
     """Main application loop with non-blocking terminal"""
     terminal = TerminalInterface()
-    terminal.display_banner()
-
-    print(f"{Fore.CYAN}LP Aggregation Mode - Mock LPs{Style.RESET_ALL}")
-    print(f"Markup: {settings.markup_bps} bps")
-    print(f"LPs: {settings.mock_lp_count} mock providers\n")
 
     # Start monitor in background
     monitor = get_monitor()
-    print(f"{Fore.GREEN}[OK] Monitor window opened{Style.RESET_ALL}\n")
 
     # Initialize database if logging is enabled
     quote_logger = None
@@ -128,7 +181,6 @@ async def main_loop():
         from .database.quote_logger import QuoteLogger
         init_database(settings.database_path)
         quote_logger = QuoteLogger(settings.database_path)
-        print(f"{Fore.GREEN}[OK] Database logging enabled: {settings.database_path}{Style.RESET_ALL}\n")
 
     # Create LP aggregator and streamer (reused across requests)
     lps = create_mock_lps()
@@ -144,21 +196,42 @@ async def main_loop():
         quote_logger=quote_logger
     )
 
-    # Track current streaming task
-    current_task: Optional[asyncio.Task] = None
+    # Create execution manager
+    lp_dict = {lp.get_name(): lp for lp in lps}
+    execution_manager = ExecutionManager(lp_dict, quote_logger)
 
-    print(f"{Fore.YELLOW}Commands:{Style.RESET_ALL}")
-    print(f"  - Enter quote request (e.g., 'b 1.5 btcusdt' or 's 2.0 ethusdt')")
-    print(f"  - Type 'x' to stop current stream")
-    print(f"  - Type 'q' to quit\n")
+    # Track current streaming task and locked quote (shared state)
+    current_task: Optional[asyncio.Task] = None
+    state = {
+        'locked_quote': None,
+        'locked_lp_quote': None,
+        'stop_stream': False
+    }
+
+    print(f"\n{Fore.CYAN}{'='*70}")
+    print(f"LP AGGREGATION RFQ SYSTEM")
+    print(f"{'='*70}{Style.RESET_ALL}\n")
+    print(f"{Fore.YELLOW}Enter Quote Request:{Style.RESET_ALL}")
+    print(f"  Format: <side> <amount> <target_asset> <pair>")
+    print(f"  Example: b 1.5 btc btcusdt")
+    print(f"  Example: s 50000 usdt btcusdt\n")
+
+    # Get event loop for async input
+    loop = asyncio.get_event_loop()
 
     while True:
-        # Get input from operator (blocking but that's OK)
-        user_input = input(f"{Fore.CYAN}>{Style.RESET_ALL} ").strip().lower()
+        # Get input from operator asynchronously (non-blocking)
+        user_input = await loop.run_in_executor(
+            None,
+            lambda: input(f"{Fore.CYAN}> {Style.RESET_ALL}")
+        )
+        user_input = user_input.strip().lower()
 
+        # Handle commands based on context
         if user_input == 'q':
             # Quit application
             if current_task and not current_task.done():
+                state['stop_stream'] = True
                 current_task.cancel()
                 try:
                     await current_task
@@ -167,44 +240,108 @@ async def main_loop():
             print(f"\n{Fore.CYAN}Goodbye!{Style.RESET_ALL}\n")
             break
 
-        if user_input == 'x':
-            # Stop current stream
-            if current_task and not current_task.done():
+        # Check if we're in streaming mode
+        if current_task and not current_task.done():
+            # Streaming active - handle p/c commands
+            if user_input == 'p':
+                # Proceed with execution
+                if state['locked_quote'] is None or state['locked_lp_quote'] is None:
+                    print(f"{Fore.RED}No locked quote available{Style.RESET_ALL}\n")
+                    continue
+
+                locked_quote = state['locked_quote']
+                locked_lp_quote = state['locked_lp_quote']
+
+                # Check if quote is still valid
+                if locked_quote.is_expired():
+                    print(f"{Fore.RED}Quote expired. Cannot execute.{Style.RESET_ALL}\n")
+                    continue
+
+                # Stop the stream FIRST (before execution)
+                state['stop_stream'] = True
                 current_task.cancel()
                 try:
                     await current_task
                 except asyncio.CancelledError:
                     pass
-                print(f"{Fore.YELLOW}[!] Stream stopped{Style.RESET_ALL}")
+
+                # Execute the trade
+                print(f"\n{Fore.CYAN}Executing trade...{Style.RESET_ALL}\n")
+
+                exec_result = await execution_manager.execute_quote(locked_quote, locked_lp_quote)
+
+                # Display results
+                if exec_result['status'] == 'SUCCESS':
+                    print(f"{Fore.GREEN}{'='*70}")
+                    print(f"EXECUTION SUCCESSFUL")
+                    print(f"{'='*70}{Style.RESET_ALL}\n")
+                    print(f"  Execution ID:   {exec_result['execution_id']}")
+                    print(f"  Hedge:          {exec_result['exchange_side']} {exec_result['executed_qty']:,.8f} {locked_quote.base_asset}")
+                    print(f"  Avg Price:      {exec_result['avg_price']:,.2f}")
+                    print(f"  Net P&L:        {Fore.GREEN}{exec_result['pnl_after_fees']:,.8f} {exec_result['pnl_asset']} ({exec_result['pnl_bps']:,.2f} bps){Style.RESET_ALL}")
+                    print(f"\n{Fore.GREEN}{'='*70}{Style.RESET_ALL}\n")
+
+                    # Update monitor to show executed status
+                    monitor.show_executed()
+                else:
+                    print(f"{Fore.RED}{'='*70}")
+                    print(f"EXECUTION FAILED: {exec_result.get('error_message', 'Unknown error')}")
+                    print(f"{'='*70}{Style.RESET_ALL}\n")
+
+                # Reset state
+                state['locked_quote'] = None
+                state['locked_lp_quote'] = None
+                state['stop_stream'] = False
+                current_task = None
+
+                print(f"{Fore.YELLOW}Enter new quote request:{Style.RESET_ALL}\n")
+                continue
+
+            elif user_input == 'c':
+                # Cancel stream
+                state['stop_stream'] = True
+                current_task.cancel()
+                try:
+                    await current_task
+                except asyncio.CancelledError:
+                    pass
+
+                # Reset state
+                state['locked_quote'] = None
+                state['locked_lp_quote'] = None
+                state['stop_stream'] = False
+                current_task = None
+
+                print(f"\n{Fore.YELLOW}Cancelled. Enter new quote request:{Style.RESET_ALL}\n")
+                continue
+
             else:
-                print(f"{Fore.YELLOW}[!] No active stream{Style.RESET_ALL}")
-            continue
+                # Invalid command during streaming
+                print(f"{Fore.YELLOW}Commands: [p] proceed  [c] cancel  [q] quit{Style.RESET_ALL}\n")
+                continue
 
-        # Parse as quote request
-        request = terminal.parse_input(user_input)
+        else:
+            # Not streaming - parse as quote request
+            request = terminal.parse_input(user_input)
 
-        if request is None:
-            print(f"{Fore.RED}[X] Invalid request. Format: <side> <amount> <pair>{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}    Example: b 1.5 btcusdt{Style.RESET_ALL}")
-            continue
+            if request is None:
+                print(f"{Fore.RED}Invalid request{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}Format: <side> <amount> <target_asset> <pair>{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}Example: b 1.5 btc btcusdt{Style.RESET_ALL}\n")
+                continue
 
-        print(f"{Fore.CYAN}Request: {request}{Style.RESET_ALL}")
+            # Reset state
+            state['locked_quote'] = None
+            state['locked_lp_quote'] = None
+            state['stop_stream'] = False
 
-        # Cancel previous stream if exists
-        if current_task and not current_task.done():
-            print(f"{Fore.YELLOW}[!] Stopping previous stream...{Style.RESET_ALL}")
-            current_task.cancel()
-            try:
-                await current_task
-            except asyncio.CancelledError:
-                pass
+            # Start new stream in background
+            current_task = asyncio.create_task(
+                handle_quote_stream(request, aggregator, streamer, monitor, state)
+            )
 
-        # Start new stream in background
-        current_task = asyncio.create_task(
-            handle_quote_stream(request, aggregator, streamer, monitor)
-        )
-
-        print(f"{Fore.GREEN}[OK] Enter new request or 'x' to stop, 'q' to quit{Style.RESET_ALL}\n")
+            # Give the task a moment to start and fetch quotes
+            await asyncio.sleep(0.5)
 
 
 def main():

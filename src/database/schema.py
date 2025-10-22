@@ -33,6 +33,7 @@ def init_database(db_path: str) -> None:
             side TEXT NOT NULL,
             base_asset TEXT NOT NULL,
             quote_asset TEXT NOT NULL,
+            target_asset TEXT NOT NULL,
             amount REAL NOT NULL,
             client_price REAL NOT NULL,
             lp_price REAL NOT NULL,
@@ -102,6 +103,48 @@ def init_database(db_path: str) -> None:
             worst_price REAL,
             last_updated REAL NOT NULL
         )
+    """)
+
+    # Create executions table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS executions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            execution_id TEXT UNIQUE NOT NULL,
+            quote_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            lp_name TEXT NOT NULL,
+            exchange_side TEXT NOT NULL,
+            quantity REAL,
+            quote_qty REAL,
+            executed_qty REAL,
+            executed_quote_qty REAL,
+            avg_price REAL,
+            commission REAL,
+            commission_asset TEXT,
+            pnl_amount REAL,
+            pnl_asset TEXT,
+            pnl_after_fees REAL,
+            pnl_bps REAL,
+            error_message TEXT,
+            executed_at REAL NOT NULL,
+            FOREIGN KEY (quote_id) REFERENCES quotes(quote_id)
+        )
+    """)
+
+    # Create indexes for executions table
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_executions_quote_id
+        ON executions(quote_id)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_executions_executed_at
+        ON executions(executed_at)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_executions_status
+        ON executions(status)
     """)
 
     conn.commit()

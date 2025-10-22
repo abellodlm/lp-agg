@@ -56,16 +56,17 @@ class QuoteLogger:
         try:
             cursor.execute("""
                 INSERT INTO quotes (
-                    quote_id, side, base_asset, quote_asset, amount,
+                    quote_id, side, base_asset, quote_asset, target_asset, amount,
                     client_price, lp_price, lp_name, markup_bps,
                     validity_seconds, is_improvement, locked_lp_name,
                     poll_number, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 quote.quote_id,
                 quote.side,
                 quote.base_asset,
                 quote.quote_asset,
+                quote.target_asset,
                 quote.amount,
                 quote.client_price,
                 quote.lp_price,

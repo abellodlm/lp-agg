@@ -264,56 +264,57 @@ Improvements are automatically highlighted in the terminal output and monitor GU
 
 ## Testing
 
-### Manual Testing with Monitor GUI
+### Running Tests
 
-Test with mock LPs and monitor GUI:
+Run the comprehensive test suite:
 ```bash
-python test_monitor_manual.py
+# All tests
+python -m pytest tests/
+
+# Specific test suites
+python -m pytest tests/test_pricing_logic.py    # Core pricing logic (5 tests)
+python -m pytest tests/test_hedge_pnl.py        # Hedge & P&L scenarios (8 tests)
+python -m pytest tests/test_system.py           # System integration tests
+python -m pytest tests/test_auto_refresh.py     # Auto-refresh functionality
+python -m pytest tests/test_expiry.py           # Quote expiry handling
+python -m pytest tests/test_scenarios.py        # End-to-end scenarios
 ```
 
-This will:
-- Open the Tkinter monitor GUI (Mario Kart-style leaderboard)
-- Stream quotes for 15 seconds
-- Display real-time LP rankings with price updates
-- Show quote locking behavior
+### Test Coverage
 
-### Testing Scenarios
+**test_pricing_logic.py** - Validates core business logic:
+- BUY/SELL base asset with proper spread direction
+- BUY/SELL quote asset with spread inversion
+- Amount calculations (multiplication vs division)
+- Rounding rules (up for client pays, down for receives)
 
-Three pre-built scenarios to test different LP behaviors:
+**test_hedge_pnl.py** - Validates all 8 execution scenarios:
+- target_asset (base/quote) × side (BUY/SELL) × profit_asset (base/quote)
+- Hedge parameter calculation
+- P&L calculation in configured profit_asset
+- All scenarios showing profitable results (4.8-5.0 bps)
 
-**Scenario 1: Competing LPs (Offset Descending Sine)**
-```bash
-python test_scenario_1.py
-```
-- 4 LPs with sine wave prices (different phases)
-- All LPs actively compete
-- Demonstrates dynamic lock switching
+**test_system.py** - Integration tests:
+- Complete quote flow from request to aggregation
+- Multi-LP polling and best quote selection
+- Validity buffer calculations
 
-**Scenario 2: Non-Competition (Best Stays #1)**
-```bash
-python test_scenario_2.py
-```
-- 1 LP consistently provides best quote (fixed low price)
-- Other LPs compete for 2nd-4th place
-- Demonstrates stable locking (no improvements)
+**test_scenarios.py** - End-to-end scenarios:
+- Various LP competition patterns
+- Quote locking and improvement detection
+- Real-world trading scenarios
 
-**Scenario 3: Hail Mary (Last-Second Improvement)**
-```bash
-python test_scenario_3.py
-```
-- Most LPs provide normal quotes
-- 1 LP dramatically improves at T-1s before expiry
-- Demonstrates last-second lock switching
+**test_auto_refresh.py** - Auto-refresh behavior:
+- Continuous polling during quote validity
+- Quote expiry and refresh handling
 
-### Run Pytest
-
-```bash
-pytest tests/
-```
+**test_expiry.py** - Quote lifecycle:
+- Validity period calculations
+- Expiry detection and handling
 
 ### Main Application
 
-Test with default configuration:
+Run with realistic LP competition (sine wave pricing):
 ```bash
 python -m src.main
 ```

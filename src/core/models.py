@@ -17,10 +17,19 @@ class QuoteRequest:
     amount: float
     base_asset: str  # e.g., 'BTC'
     quote_asset: str  # e.g., 'USDT'
+    target_asset: str  # Which asset the amount is denominated in (base or quote)
     timestamp: float = field(default_factory=time.time)
 
+    def __post_init__(self):
+        """Validate target_asset is either base or quote"""
+        if self.target_asset not in [self.base_asset, self.quote_asset]:
+            raise ValueError(
+                f"target_asset must be either {self.base_asset} or {self.quote_asset}, "
+                f"got {self.target_asset}"
+            )
+
     def __str__(self):
-        return f"{self.side} {self.amount} {self.base_asset}/{self.quote_asset}"
+        return f"{self.side} {self.amount} {self.target_asset} on {self.base_asset}/{self.quote_asset}"
 
 
 @dataclass
@@ -60,12 +69,18 @@ class AggregatedQuote:
     amount: float
     base_asset: str
     quote_asset: str
+    target_asset: str        # Which asset the amount is denominated in
+    profit_asset: str        # Which asset to keep profit in ('base' or 'quote')
 
     # Client flows
     client_gives_amount: float
     client_gives_asset: str
     client_receives_amount: float
     client_receives_asset: str
+
+    # Precision
+    base_decimals: int       # Decimal places for base asset
+    quote_decimals: int      # Decimal places for quote asset
 
     # Validity
     validity_seconds: float

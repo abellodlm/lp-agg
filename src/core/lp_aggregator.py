@@ -5,9 +5,11 @@ Pings multiple LPs concurrently, selects best quote, and applies markup.
 """
 
 import asyncio
+import math
 from typing import List, Optional
 from .models import QuoteRequest, LPQuote, AggregatedQuote
 from ..lps.base_lp import LiquidityProvider
+from ..config.pairs import get_pair_config
 
 
 class LPAggregator:
@@ -149,29 +151,86 @@ class LPAggregator:
         request: QuoteRequest
     ) -> AggregatedQuote:
         """
-        Apply markup to LP quote and create client quote.
-        """
-        # Apply markup
-        if request.side == 'BUY':
-            # Client buying: add markup to price
-            client_price = lp_quote.price * (1 + self.markup_bps / 10000)
-        else:  # SELL
-            # Client selling: subtract markup from price
-            client_price = lp_quote.price * (1 - self.markup_bps / 10000)
+        Apply markup to LP quote and create client quote with proper business logic.
 
-        # Calculate client flows
-        if request.side == 'BUY':
-            # Client buys base, pays quote
-            client_gives_amount = request.amount * client_price
-            client_gives_asset = request.quote_asset
-            client_receives_amount = request.amount
-            client_receives_asset = request.base_asset
-        else:  # SELL
-            # Client sells base, receives quote
-            client_gives_amount = request.amount
-            client_gives_asset = request.base_asset
-            client_receives_amount = request.amount * client_price
-            client_receives_asset = request.quote_asset
+        This method handles:
+        - Spread direction based on target_asset
+        - Proper amount calculations for both base and quote target assets
+        - Rounding rules (round up when client pays, down when client receives)
+        """
+        # Get pair configuration
+        pair_symbol = f"{request.base_asset}{request.quote_asset}"
+        pair_config = get_pair_config(pair_symbol)
+
+        # Determine spread direction based on what client is actually buying
+        # When client trades quote asset, the spread direction is inverted
+        if request.target_asset == request.base_asset:
+            # Client trading base - use side directly
+            # BUY base = pay premium, SELL base = receive discount
+            if request.side == 'BUY':
+                client_price = lp_quote.price * (1 + self.markup_bps / 10000)
+            else:  # SELL
+                client_price = lp_quote.price * (1 - self.markup_bps / 10000)
+        else:
+            # Client trading quote - invert spread direction
+            # SELL quote (buy base) = pay premium for base
+            # BUY quote (sell base) = receive discount for base
+            if request.side == 'SELL':
+                # Client sells quote, buys base → price should be higher
+                client_price = lp_quote.price * (1 + self.markup_bps / 10000)
+            else:  # BUY
+                # Client buys quote, sells base → price should be lower
+                client_price = lp_quote.price * (1 - self.markup_bps / 10000)
+
+        # Calculate amounts based on target asset
+        if request.target_asset == request.base_asset:
+            # Client trading base asset (e.g., BTC on BTCUSDT)
+            if request.side == 'BUY':
+                # Client buys base, pays quote
+                client_gives_asset = request.quote_asset
+                client_receives_asset = request.base_asset
+                client_receives_amount = request.amount
+                # Client pays: amount_base × price (quote per base)
+                client_gives_amount = request.amount * client_price
+            else:  # SELL
+                # Client sells base, receives quote
+                client_gives_asset = request.base_asset
+                client_receives_asset = request.quote_asset
+                client_gives_amount = request.amount
+                # Client receives: amount_base × price (quote per base)
+                client_receives_amount = request.amount * client_price
+
+        else:  # target_asset == quote_asset
+            # Client trading quote asset (e.g., USDT on BTCUSDT)
+            if request.side == 'BUY':
+                # Client buys quote, pays base
+                client_gives_asset = request.base_asset
+                client_receives_asset = request.quote_asset
+                client_receives_amount = request.amount
+                # Client pays: amount_quote / price (base per quote)
+                client_gives_amount = request.amount / client_price
+            else:  # SELL
+                # Client sells quote, receives base
+                client_gives_asset = request.quote_asset
+                client_receives_asset = request.base_asset
+                client_gives_amount = request.amount
+                # Client receives: amount_quote / price (base per quote)
+                client_receives_amount = request.amount / client_price
+
+        # Apply rounding rules using pair-specific decimals
+        gives_decimals = pair_config.base_decimals if client_gives_asset == request.base_asset else pair_config.quote_decimals
+        receives_decimals = pair_config.base_decimals if client_receives_asset == request.base_asset else pair_config.quote_decimals
+
+        client_gives_amount = self._round_amount(
+            client_gives_amount,
+            gives_decimals,
+            round_up=True  # Protect market maker - client pays more
+        )
+        client_receives_amount = self._round_amount(
+            client_receives_amount,
+            receives_decimals,
+            round_up=False  # Protect market maker - client receives less
+        )
 
         # Reduce validity for client (safety buffer)
         client_validity = max(
@@ -189,9 +248,32 @@ class LPAggregator:
             amount=request.amount,
             base_asset=request.base_asset,
             quote_asset=request.quote_asset,
+            target_asset=request.target_asset,
+            profit_asset=pair_config.profit_asset,
             client_gives_amount=client_gives_amount,
             client_gives_asset=client_gives_asset,
             client_receives_amount=client_receives_amount,
             client_receives_asset=client_receives_asset,
+            base_decimals=pair_config.base_decimals,
+            quote_decimals=pair_config.quote_decimals,
             validity_seconds=client_validity
         )
+
+    def _round_amount(self, amount: float, decimals: int, round_up: bool) -> float:
+        """
+        Round amount to specified decimal places.
+
+        Args:
+            amount: Amount to round
+            decimals: Number of decimal places
+            round_up: True to round up (client pays), False to round down (client receives)
+
+        Returns:
+            Rounded amount
+        """
+        multiplier = 10 ** decimals
+
+        if round_up:
+            return math.ceil(amount * multiplier) / multiplier
+        else:
+            return math.floor(amount * multiplier) / multiplier

@@ -94,7 +94,10 @@ class QuoteStreamer:
             self.quote_logger.log_quote(best_quote, all_lp_quotes, poll_count, True, self.locked_lp_name)
 
         # SUBSEQUENT POLLS: Poll only competitors
+        loop_count = 0
         while self.streaming:
+            loop_count += 1
+
             # Wait before next poll
             await asyncio.sleep(self.poll_interval_ms / 1000)
 

@@ -47,6 +47,9 @@ class LPAggregationMonitor:
         self.lp_row_frames = []  # List of (frame, name_label, price_label, info_label)
         self.status_label = None
 
+        # State flags
+        self.is_executed = False  # Track if trade was executed
+
         self.lock = threading.Lock()
 
     def start(self):
@@ -208,15 +211,8 @@ class LPAggregationMonitor:
         )
         auto_refresh_check.pack(side='right')
 
-        # Status label
-        self.status_label = tk.Label(
-            status_frame,
-            text="Ready",
-            font=small_font,
-            bg=bg_color,
-            fg=muted_color
-        )
-        self.status_label.pack(side='left')
+        # Status label removed (redundant - quote box shows status)
+        self.status_label = None
 
         # Start update loop
         self.window.after(1000, self._update_loop)
@@ -287,8 +283,8 @@ class LPAggregationMonitor:
                 if self.all_lp_quotes:
                     self._update_leaderboard_display()
 
-                # Update validity countdown
-                if self.best_quote:
+                # Update validity countdown (only if not executed)
+                if self.best_quote and not self.is_executed:
                     self._update_validity_countdown()
         except Exception as e:
             print(f"Monitor update error: {e}")
@@ -493,26 +489,34 @@ class LPAggregationMonitor:
             self.best_quote = best_quote
             self.poll_count = poll_count
 
+            # Reset executed flag on new quote (poll 1 means new quote request)
+            if poll_count == 1:
+                self.is_executed = False
+
             # Update status
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            lp_count = len(all_lp_quotes)
-
-            # Show locked LP in status bar
-            if locked_lp_name:
-                status_text = f"📊 Poll #{poll_count} | {lp_count} LPs | Locked: {locked_lp_name} | {timestamp}"
-            else:
-                status_text = f"📊 Poll #{poll_count} | {lp_count} LPs responded | Last update: {timestamp}"
-
-            if self.status_label:
-                self.status_label.config(text=status_text, fg="#888888")
+            # Status label removed - no longer needed
 
     def show_expired(self):
         """Show expired status"""
         with self.lock:
-            if self.status_label:
-                self.status_label.config(
-                    text="Quote expired - waiting for new request",
+            # Update the validity label in the quote box to show EXPIRED
+            if self.validity_label:
+                self.validity_label.config(
+                    text="EXPIRED",
                     fg="#ff6b6b"
+                )
+
+    def show_executed(self):
+        """Show executed status"""
+        with self.lock:
+            # Set flag to prevent timer from overwriting
+            self.is_executed = True
+
+            # Update the validity label in the quote box to show EXECUTED
+            if self.validity_label:
+                self.validity_label.config(
+                    text="EXECUTED",
+                    fg="#51cf66"
                 )
 
     def is_auto_refresh_enabled(self) -> bool:

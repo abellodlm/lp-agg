@@ -3,7 +3,12 @@
     "allow": [
       "Bash(python tests/test_scenario_1.py)",
       "Bash(timeout 25 python tests/test_scenario_1.py)",
-      "Bash(python verify_db.py)"
+      "Bash(python verify_db.py)",
+      "Read(//c/Users/andre/OneDrive/Escritorio/Quoter/rfq/**)",
+      "Bash(python tests/test_pricing_logic.py)",
+      "Bash(python src/main.py:*)",
+      "Bash(python tests/test_hedge_pnl.py:*)",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []
