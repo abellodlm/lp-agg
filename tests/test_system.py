@@ -5,6 +5,7 @@ This script simulates a quote request without operator input.
 """
 
 import asyncio
+import pytest
 from src.core.models import QuoteRequest
 from src.core.lp_aggregator import LPAggregator
 from src.core.quote_streamer import QuoteStreamer
@@ -12,6 +13,7 @@ from src.lps.mock_lp import MockLP
 from src.config.settings import settings
 
 
+@pytest.mark.asyncio
 async def test_single_quote():
     """Test getting a single aggregated quote"""
     print("=" * 60)
@@ -33,7 +35,8 @@ async def test_single_quote():
         side='BUY',
         amount=1.5,
         base_asset='BTC',
-        quote_asset='USDT'
+        quote_asset='USDT',
+        target_asset='BTC'
     )
 
     print(f"\nRequest: {request}")
@@ -54,7 +57,8 @@ async def test_single_quote():
         side='SELL',
         amount=2.0,
         base_asset='BTC',
-        quote_asset='USDT'
+        quote_asset='USDT',
+        target_asset='BTC'
     )
 
     print(f"\n\nRequest: {request_sell}")
@@ -71,6 +75,7 @@ async def test_single_quote():
         print("[FAIL] No quote received")
 
 
+@pytest.mark.asyncio
 async def test_quote_streaming():
     """Test quote streaming with improvements"""
     print("\n\n" + "=" * 60)
@@ -91,17 +96,20 @@ async def test_quote_streaming():
         side='BUY',
         amount=1.0,
         base_asset='ETH',
-        quote_asset='USDT'
+        quote_asset='USDT',
+        target_asset='ETH'
     )
 
     quote_count = 0
 
-    def on_update(quote, is_improvement):
+    def on_update(all_lp_quotes, best_quote, poll_count, is_improvement, locked_lp_name):
         nonlocal quote_count
         quote_count += 1
         improvement_tag = " [IMPROVEMENT]" if is_improvement else ""
         print(f"\n  Quote {quote_count}{improvement_tag}:")
-        print(f"    {quote.lp_name}: {quote.client_price:,.2f} USDT (valid: {quote.validity_seconds:.1f}s)")
+        print(f"    {best_quote.lp_name}: {best_quote.client_price:,.2f} USDT (valid: {best_quote.validity_seconds:.1f}s)")
+        if locked_lp_name:
+            print(f"    Locked LP: {locked_lp_name}")
 
     print(f"\nStreaming quotes for {request}...")
     print("Polling every 1 second for 5 seconds...\n")
@@ -115,6 +123,7 @@ async def test_quote_streaming():
     print(f"\n[OK] Stream completed. Received {quote_count} quote(s)")
 
 
+@pytest.mark.asyncio
 async def test_lp_selection_logic():
     """Test that LP selection logic works correctly"""
     print("\n\n" + "=" * 60)
@@ -131,7 +140,13 @@ async def test_lp_selection_logic():
     aggregator = LPAggregator(lps=lps, markup_bps=5.0)
 
     # BUY should select cheapest LP (even with ±1% variation)
-    buy_request = QuoteRequest(side='BUY', amount=1.0, base_asset='BTC', quote_asset='USDT')
+    buy_request = QuoteRequest(
+        side='BUY',
+        amount=1.0,
+        base_asset='BTC',
+        quote_asset='USDT',
+        target_asset='BTC'
+    )
     buy_quote = await aggregator.get_best_quote(buy_request)
 
     print(f"\nBUY Request:")
@@ -142,7 +157,13 @@ async def test_lp_selection_logic():
     print(f"  [PASS]" if buy_pass else "  [FAIL]")
 
     # SELL should select most expensive LP (even with ±1% variation)
-    sell_request = QuoteRequest(side='SELL', amount=1.0, base_asset='BTC', quote_asset='USDT')
+    sell_request = QuoteRequest(
+        side='SELL',
+        amount=1.0,
+        base_asset='BTC',
+        quote_asset='USDT',
+        target_asset='BTC'
+    )
     sell_quote = await aggregator.get_best_quote(sell_request)
 
     print(f"\nSELL Request:")

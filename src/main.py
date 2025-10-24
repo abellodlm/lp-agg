@@ -6,10 +6,11 @@ This application:
 2. Pings multiple LPs asynchronously
 3. Selects best quote and applies markup
 4. Streams live quote updates showing price improvements
-5. Displays LP leaderboard in Tkinter monitor (Mario Kart style)
+5. Displays LP leaderboard in Tkinter monitor
 """
 
 import asyncio
+import threading
 from typing import List, Optional, Dict
 from colorama import Fore, Style
 
@@ -40,9 +41,9 @@ def create_mock_lps() -> List[LiquidityProvider]:
     This creates realistic competition where different LPs win at different times.
     """
     # Sine wave parameters (increased frequency for faster competition)
-    amplitude = 100.0
-    frequency = 0.15  # Increased from 0.05 for faster oscillation (3x faster)
-    trend = -10.0
+    amplitude = 50
+    frequency = 0.20  # Increased from 0.05 for faster oscillation (3x faster)
+    trend = -1
     base_price = settings.mock_base_price
 
     # Phase offsets for 3 LPs (creates competition)
@@ -70,7 +71,8 @@ async def handle_quote_stream(
     aggregator: LPAggregator,
     streamer: QuoteStreamer,
     monitor,
-    state: Dict
+    state: Dict,
+    state_lock
 ):
     """
     Stream quotes for a given request and update monitor.
@@ -93,14 +95,18 @@ async def handle_quote_stream(
         nonlocal previous_locked_lp
 
         # Check if stream should stop
-        if state.get('stop_stream', False):
+        with state_lock:
+            should_stop = state.get('stop_stream', False)
+        
+        if should_stop:
             streamer.stop()
             return
 
         try:
-            # Update shared state with locked quote
-            state['locked_quote'] = best_quote
-            state['locked_lp_quote'] = next((q for q in all_lp_quotes if q.lp_name == locked_lp_name), None)
+            # Update shared state with locked quote (protected by lock)
+            with state_lock:
+                state['locked_quote'] = best_quote
+                state['locked_lp_quote'] = next((q for q in all_lp_quotes if q.lp_name == locked_lp_name), None)
 
             # Update monitor with all LP data
             monitor.update_display(all_lp_quotes, best_quote, poll_count, locked_lp_name)
@@ -171,16 +177,18 @@ async def main_loop():
     """Main application loop with non-blocking terminal"""
     terminal = TerminalInterface()
 
-    # Start monitor in background
-    monitor = get_monitor()
-
     # Initialize database if logging is enabled
     quote_logger = None
+    db_path = None
     if settings.enable_database_logging:
         from .database.schema import init_database
         from .database.quote_logger import QuoteLogger
         init_database(settings.database_path)
         quote_logger = QuoteLogger(settings.database_path)
+        db_path = settings.database_path
+
+    # Start monitor in background with database path
+    monitor = get_monitor(db_path=db_path)
 
     # Create LP aggregator and streamer (reused across requests)
     lps = create_mock_lps()
@@ -207,6 +215,7 @@ async def main_loop():
         'locked_lp_quote': None,
         'stop_stream': False
     }
+    state_lock = threading.Lock()  # Protect shared state (threading.Lock for sync callback)
 
     print(f"\n{Fore.CYAN}{'='*70}")
     print(f"LP AGGREGATION RFQ SYSTEM")
@@ -231,7 +240,8 @@ async def main_loop():
         if user_input == 'q':
             # Quit application
             if current_task and not current_task.done():
-                state['stop_stream'] = True
+                with state_lock:
+                    state['stop_stream'] = True
                 current_task.cancel()
                 try:
                     await current_task
@@ -258,7 +268,8 @@ async def main_loop():
                     continue
 
                 # Stop the stream FIRST (before execution)
-                state['stop_stream'] = True
+                with state_lock:
+                    state['stop_stream'] = True
                 current_task.cancel()
                 try:
                     await current_task
@@ -289,9 +300,10 @@ async def main_loop():
                     print(f"{'='*70}{Style.RESET_ALL}\n")
 
                 # Reset state
-                state['locked_quote'] = None
-                state['locked_lp_quote'] = None
-                state['stop_stream'] = False
+                with state_lock:
+                    state['locked_quote'] = None
+                    state['locked_lp_quote'] = None
+                    state['stop_stream'] = False
                 current_task = None
 
                 print(f"{Fore.YELLOW}Enter new quote request:{Style.RESET_ALL}\n")
@@ -299,7 +311,8 @@ async def main_loop():
 
             elif user_input == 'c':
                 # Cancel stream
-                state['stop_stream'] = True
+                with state_lock:
+                    state['stop_stream'] = True
                 current_task.cancel()
                 try:
                     await current_task
@@ -307,9 +320,10 @@ async def main_loop():
                     pass
 
                 # Reset state
-                state['locked_quote'] = None
-                state['locked_lp_quote'] = None
-                state['stop_stream'] = False
+                with state_lock:
+                    state['locked_quote'] = None
+                    state['locked_lp_quote'] = None
+                    state['stop_stream'] = False
                 current_task = None
 
                 print(f"\n{Fore.YELLOW}Cancelled. Enter new quote request:{Style.RESET_ALL}\n")
@@ -337,7 +351,7 @@ async def main_loop():
 
             # Start new stream in background
             current_task = asyncio.create_task(
-                handle_quote_stream(request, aggregator, streamer, monitor, state)
+                handle_quote_stream(request, aggregator, streamer, monitor, state, state_lock)
             )
 
             # Give the task a moment to start and fetch quotes

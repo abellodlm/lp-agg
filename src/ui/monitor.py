@@ -28,15 +28,15 @@ class LPAggregationMonitor:
     - Thread-safe updates
     """
 
-    def __init__(self):
+    def __init__(self, db_path: Optional[str] = None):
         self.window: Optional[tk.Tk] = None
         self.running = False
+        self.db_path = db_path
 
         # Current data
         self.best_quote: Optional[AggregatedQuote] = None
         self.all_lp_quotes: List[LPQuote] = []
         self.poll_count = 0
-        self.auto_refresh_enabled = None  # Will be initialized in _run_gui
 
         # GUI elements
         self.quote_id_label = None
@@ -46,6 +46,7 @@ class LPAggregationMonitor:
         self.validity_label = None
         self.lp_row_frames = []  # List of (frame, name_label, price_label, info_label)
         self.status_label = None
+        self.blotter = None  # ExecutionBlotter instance
 
         # State flags
         self.is_executed = False  # Track if trade was executed
@@ -65,11 +66,8 @@ class LPAggregationMonitor:
         self.window = tk.Tk()
         self.window.title("LP Aggregation Monitor")
 
-        # Initialize BooleanVar now that window exists
-        self.auto_refresh_enabled = tk.BooleanVar(value=False)
-
         # Window configuration
-        self.window.geometry("700x800")
+        self.window.geometry("1200x800")  # Increased width for two columns
         self.window.resizable(False, False)
         self.window.attributes('-topmost', True)  # Always on top
 
@@ -88,15 +86,28 @@ class LPAggregationMonitor:
         small_font = font.Font(family="Consolas", size=10)
         tiny_font = font.Font(family="Consolas", size=9)
 
-        # Main container
+        # Main container with grid layout for two columns
         main_container = tk.Frame(self.window, bg=bg_color)
         main_container.pack(fill='both', expand=True, padx=15, pady=15)
 
+        # Configure grid: 60% left column (monitor), 40% right column (blotter)
+        main_container.columnconfigure(0, weight=6)
+        main_container.columnconfigure(1, weight=4)
+        main_container.rowconfigure(0, weight=1)
+
+        # LEFT COLUMN: LP Monitor
+        left_frame = tk.Frame(main_container, bg=bg_color)
+        left_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 10))
+
+        # RIGHT COLUMN: Execution Blotter
+        right_frame = tk.Frame(main_container, bg=bg_color)
+        right_frame.grid(row=0, column=1, sticky='nsew')
+
         # ==================================================
-        # HEADER
+        # LEFT COLUMN CONTENT: LP MONITOR
         # ==================================================
         tk.Label(
-            main_container,
+            left_frame,
             text="LP AGGREGATION MONITOR",
             font=title_font,
             bg=bg_color,
@@ -106,7 +117,7 @@ class LPAggregationMonitor:
         # ==================================================
         # BEST QUOTE SECTION
         # ==================================================
-        best_quote_frame = tk.Frame(main_container, bg="#2a2a2a", relief='ridge', bd=2)
+        best_quote_frame = tk.Frame(left_frame, bg="#2a2a2a", relief='ridge', bd=2)
         best_quote_frame.pack(fill='x', pady=(0, 20))
 
         # Quote ID
@@ -176,7 +187,7 @@ class LPAggregationMonitor:
         # LP LEADERBOARD SECTION
         # ==================================================
         tk.Label(
-            main_container,
+            left_frame,
             text="LP LEADERBOARD",
             font=title_font,
             bg=bg_color,
@@ -184,35 +195,22 @@ class LPAggregationMonitor:
         ).pack(pady=(10, 10))
 
         # Create scrollable frame for LPs
-        lp_container = tk.Frame(main_container, bg=bg_color)
+        lp_container = tk.Frame(left_frame, bg=bg_color)
         lp_container.pack(fill='both', expand=True)
 
         # Create up to 10 LP rows (dynamic display)
         for i in range(10):
             self._create_lp_row(lp_container, bg_color, fg_color, muted_color)
 
-        # ==================================================
-        # STREAM STATUS SECTION
-        # ==================================================
-        status_frame = tk.Frame(main_container, bg=bg_color)
-        status_frame.pack(fill='x', pady=(15, 0))
-
-        # Auto-refresh toggle
-        auto_refresh_check = tk.Checkbutton(
-            status_frame,
-            text="Auto-refresh",
-            variable=self.auto_refresh_enabled,
-            font=small_font,
-            bg=bg_color,
-            fg=fg_color,
-            selectcolor=bg_color,
-            activebackground=bg_color,
-            activeforeground=accent_color
-        )
-        auto_refresh_check.pack(side='right')
-
         # Status label removed (redundant - quote box shows status)
         self.status_label = None
+
+        # ==================================================
+        # RIGHT COLUMN CONTENT: EXECUTION BLOTTER
+        # ==================================================
+        if self.db_path:
+            from .blotter import ExecutionBlotter
+            self.blotter = ExecutionBlotter(right_frame, self.db_path)
 
         # Start update loop
         self.window.after(1000, self._update_loop)
@@ -485,8 +483,9 @@ class LPAggregationMonitor:
             locked_lp_name: Name of currently locked LP (if any)
         """
         with self.lock:
-            self.all_lp_quotes = all_lp_quotes
-            self.best_quote = best_quote
+            # Deep copy to prevent shared state issues
+            self.all_lp_quotes = list(all_lp_quotes) if all_lp_quotes else []
+            self.best_quote = best_quote  # AggregatedQuote is immutable (dataclass)
             self.poll_count = poll_count
 
             # Reset executed flag on new quote (poll 1 means new quote request)
@@ -519,11 +518,6 @@ class LPAggregationMonitor:
                     fg="#51cf66"
                 )
 
-    def is_auto_refresh_enabled(self) -> bool:
-        """Check if auto-refresh is enabled"""
-        if self.auto_refresh_enabled is None:
-            return False
-        return self.auto_refresh_enabled.get()
 
     def _on_close(self):
         """Handle window close"""
@@ -546,13 +540,24 @@ _monitor_instance: Optional[LPAggregationMonitor] = None
 _monitor_lock = threading.Lock()
 
 
-def get_monitor() -> LPAggregationMonitor:
-    """Get or create the global monitor instance"""
+def get_monitor(db_path: Optional[str] = None) -> LPAggregationMonitor:
+    """
+    Get or create the global monitor instance.
+
+    Args:
+        db_path: Optional path to database for blotter
+
+    Returns:
+        Global monitor instance
+    """
     global _monitor_instance
 
     with _monitor_lock:
         if _monitor_instance is None:
-            _monitor_instance = LPAggregationMonitor()
+            _monitor_instance = LPAggregationMonitor(db_path=db_path)
             _monitor_instance.start()
+        elif db_path and not _monitor_instance.db_path:
+            # Update db_path if monitor already exists but db_path wasn't set
+            _monitor_instance.db_path = db_path
 
         return _monitor_instance
